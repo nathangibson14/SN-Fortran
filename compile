@@ -1,0 +1,2 @@
+#!/bin/bash
+gfortran src/stop_watch.f90 src/mesh_type.f90 src/Quadrature.f90 src/nuclear_data.f90 src/solvers.f90 src/DCT_type.f90 src/SN_Fortran.f90
