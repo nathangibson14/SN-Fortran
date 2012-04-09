@@ -63,47 +63,74 @@ type(xsdata) function get_nuclear_data(groups,folder)
 
 end function get_nuclear_data
 
-subroutine SHEM_pin_cell(sigma)
+subroutine test_pin_cell(sigma, groups, folder)
     implicit none
     
+    character(len=*), intent(in)                :: folder
+    integer, intent(in)                         :: groups
     type(xsdata), dimension(2), intent(out)     :: sigma
-    type(xsdata), dimension(4)                  :: xs
+    type(xsdata), dimension(4), target          :: xs
     
-    real(kind=8)        :: N_H, N_O, N_235, N_238
+    real(kind=8), dimension(4)                  :: N
+    real(kind=8), dimension(:,:), pointer       :: temp_scat
+    integer                                     :: i
     
-    xs(1) = get_nuclear_data(361,'SHEM361/h1')
-    xs(2) = get_nuclear_data(361,'SHEM361/o16')
-    xs(3) = get_nuclear_data(361,'SHEM361/u235')
-    xs(4) = get_nuclear_data(361,'SHEM361/u238')
+    write(*,*) 'h-h2o...'    
+    xs(1) = get_nuclear_data(groups, folder//'/h-h2o')
+
+    write(*,*) 'o16...'
+    xs(2) = get_nuclear_data(groups, folder//'/o16')
     
-    allocate(sigma(1)%tot(361),sigma(1)%chi(361),sigma(1)%nufis(361), &
-        & sigma(1)%scat(361,361))
-    allocate(sigma(2)%tot(361),sigma(2)%chi(361),sigma(2)%nufis(361), &
-        & sigma(2)%scat(361,361))
-    sigma(1)%groups = 361
-    sigma(2)%groups = 361
+    write(*,*) 'u235...'
+    xs(3) = get_nuclear_data(groups, folder//'/u235')
     
+    write(*,*) 'u238...'
+    xs(4) = get_nuclear_data(groups, folder//'/u238')
+    
+    allocate(sigma(1)%tot(groups),sigma(1)%chi(groups),sigma(1)%nufis(groups), &
+        & sigma(1)%scat(groups,groups))
+    allocate(sigma(2)%tot(groups),sigma(2)%chi(groups),sigma(2)%nufis(groups), &
+        & sigma(2)%scat(groups,groups))
+    allocate(temp_scat(groups,groups))
+    sigma(1)%groups = groups
+    sigma(2)%groups = groups
+    
+    write(*,*) 'material 1...'
     ! material 1
-    N_H = 0.0
-    N_O = 0.0446
-    N_235 = 6.691e-4 
-    N_238 = 0.0216
-    sigma(1)%tot   = N_H*xs(1)%tot + N_O*xs(2)%tot + N_235*xs(3)%tot + N_238*xs(4)%tot
-    sigma(1)%nufis = N_H*xs(1)%nufis + N_O*xs(2)%nufis + N_235*xs(3)%nufis + N_238*xs(4)%nufis
+    N(1) = 0.0          ! H-H2O
+    N(2) = 0.0446       ! O-16
+    N(3) = 6.691e-4     ! U-235
+    N(4) = 0.0216       ! U-238
+    sigma(1)%tot   = N(1)*xs(1)%tot + N(2)*xs(2)%tot + N(3)*xs(3)%tot + N(4)*xs(4)%tot
+    sigma(1)%nufis = N(1)*xs(1)%nufis + N(2)*xs(2)%nufis + N(3)*xs(3)%nufis + N(4)*xs(4)%nufis
     sigma(1)%chi   = xs(3)%chi
-    sigma(1)%scat  = N_H*xs(1)%scat + N_O*xs(2)%scat + N_235*xs(3)%scat + N_238*xs(4)%scat
-
-    ! material 2
-    N_H = 0.0669
-    N_O = 0.0335
-    N_235 = 0.0
-    N_238 = 0.0
-    sigma(2)%tot   = N_H*xs(1)%tot + N_O*xs(2)%tot + N_235*xs(3)%tot + N_238*xs(4)%tot
-    sigma(2)%nufis = N_H*xs(1)%nufis + N_O*xs(2)%nufis + N_235*xs(3)%nufis + N_238*xs(4)%nufis
-    sigma(2)%chi   = xs(3)%chi
-    sigma(2)%scat  = N_H*xs(1)%scat + N_O*xs(2)%scat + N_235*xs(3)%scat + N_238*xs(4)%scat
+    sigma(1)%scat = 0.0
+    do i=1,4
+        temp_scat => xs(i)%scat
+        sigma(1)%scat = sigma(1)%scat + N(i)*temp_scat
+    enddo
+!~     sigma(1)%scat  = N(1)*xs(1)%scat + N(2)*xs(2)%scat + N(3)*xs(3)%scat + N(4)*xs(4)%scat
     
+    
+    write(*,*) 'material 2...'
+    ! material 2
+    N(1)  = 0.0669      ! H-H2O
+    N(2)  = 0.0335      ! O-16
+    N(3)  = 0.0         ! U-235
+    N(4)  = 0.0         ! U-238
+    sigma(2)%tot   = N(1)*xs(1)%tot + N(2)*xs(2)%tot + N(3)*xs(3)%tot + N(4)*xs(4)%tot
+    sigma(2)%nufis = N(1)*xs(1)%nufis + N(2)*xs(2)%nufis + N(3)*xs(3)%nufis + N(4)*xs(4)%nufis
+    sigma(2)%chi   = xs(3)%chi
+    sigma(2)%scat = 0.0
+    do i=1,4
+        temp_scat => xs(i)%scat
+        sigma(2)%scat = sigma(2)%scat + N(i)*temp_scat
+    enddo
+!~     sigma(2)%scat  = N(1)*xs(1)%scat + N(2)*xs(2)%scat + N(3)*xs(3)%scat + N(4)*xs(4)%scat
+    
+    deallocate(xs(1)%scat,xs(2)%scat,xs(3)%scat,xs(4)%scat)
 
-end subroutine SHEM_pin_cell
+
+end subroutine test_pin_cell
 
 end module nuclear_data

@@ -25,11 +25,10 @@ subroutine sn_1d(mesh,quad,bc,xs,Q_iso,phi,Q_disc)
     integer                             :: gsiter_max = 500
     integer                             :: siter_max  = 500
     
-    real(kind=8)                        :: k_tol  = 1.e-6  ! in keig
     real(kind=8)                        :: gs_tol = 1.e-8 ! in phi 1 norm
     real(kind=8)                        :: s_tol  = 1.e-10 ! in psi infinity norm
     
-    integer                             :: g, gg, i, j, angle   
+    integer                             :: g, g_min, i, angle   
     integer                             :: groups, NFM, angles
     
     real(kind=8), dimension(:,:,:), allocatable :: psi_edge, psi_mesh, psi_old_s
@@ -49,36 +48,44 @@ subroutine sn_1d(mesh,quad,bc,xs,Q_iso,phi,Q_disc)
     allocate(phi_old(groups,NFM))
     allocate(Q(NFM),Q_s(NFM))
     
-    ! phi = 1
     psi_edge = 0.0
     psi_mesh = 0.0
+    phi_old = 0.0
+    g_min = 1
 
     gauss_seidel: do gsiter=1,gsiter_max
+             
+        if (gsiter==1) then
+            g_min = 1
+        else
+            if (groups < 100) then
+                g_min = 1
+            elseif (groups < 1000) then
+                g_min = groups-100
+            else
+                g_min = groups-1000
+            endif
+        endif
         
+        write(*,*) '    GS iter ', gsiter, maxval(abs(phi(g_min:groups,:)-phi_old(g_min:groups,:)))
         phi_old = phi
         
-        group_sweep: do g=1,groups
+        group_sweep: do g=g_min,groups
             ! build scattering source
             Q_s = 0.0
             do i=1,NFM
                 Q_s(i) = dot_product(xs(mesh%matl(i))%scat(g,:),phi(:,i)) - &
                     & xs(mesh%matl(i))%scat(g,g)*phi(g,i)
             enddo
-            
-            call start_timer(2)           
-            source_iteration: do siter=1,siter_max
-                call start_timer(7)
-                psi_old_s(g,:,:) = psi_edge(g,:,:)
-                t(7) = t(7) + read_timer(7)
                 
-                call start_timer(4)
+            source_iteration: do siter=1,siter_max
+                psi_old_s(g,:,:) = psi_edge(g,:,:)
+                
                 ! build total iso source
                 do i=1,NFM
                     Q(i) = 0.5*(Q_s(i)+xs(mesh%matl(i))%scat(g,g)*phi(g,i) + Q_iso(g,i))
                 enddo
-                t(4) = t(4)+read_timer(4)
                 
-                call start_timer(3)                                
                 ! sweep over negative angles
                 do angle = 1,angles/2
                     psi_edge(g,NFM+1,angle) = bc(2)*psi_edge(g,NFM+1,angles-angle+1)
@@ -102,17 +109,13 @@ subroutine sn_1d(mesh,quad,bc,xs,Q_iso,phi,Q_disc)
                     enddo
                     psi_mesh(g,:,angle) = psi_edge(g,2:NFM+1,angle)
                 enddo
-                t(3)=t(3)+read_timer(3)
                 
-                call start_timer(5)
                 ! calculate scalar flux
                 phi(g,:) = 0.0
                 do angle=1,angles
                     phi(g,:) = phi(g,:)+quad%weight(angle)*psi_mesh(g,:,angle)
                 enddo
-                t(5) = t(5) + read_timer(5)
                 
-                call start_timer(6)
                 ! check convergence 
                 if (maxval(abs(psi_old_s(g,:,:)-psi_edge(g,:,:))) < s_tol) then
                     ! write(*,*) '       Source converged at ', siter
@@ -121,16 +124,16 @@ subroutine sn_1d(mesh,quad,bc,xs,Q_iso,phi,Q_disc)
                     write(*,*) 'Source iteration not converged!'
                     ! stop
                 endif
-                t(6) = t(6) + read_timer(6)
                 
             enddo source_iteration
-            t(2) = t(2)+read_timer(2)
             
         enddo group_sweep
         
         ! check convergence
+!~         if (sum(abs(phi(g_min:groups,:)-phi_old(g_min:groups,:))) &
+!~             & /(groups-g_min+1+NFM) < gs_tol) then
         if (sum(abs(phi-phi_old))/(groups+NFM) < gs_tol) then
-            write(*,*) '       GS converged at ', gsiter
+            ! write(*,*) '       GS converged at ', gsiter
             exit gauss_seidel
         elseif (gsiter == gsiter_max) then
             write(*,*) 'Gauss-Seidel iteration not converged!'
@@ -146,10 +149,6 @@ subroutine sn_1d(mesh,quad,bc,xs,Q_iso,phi,Q_disc)
 !~     enddo
 !~     close(unit=51)
 !~     stop    
-    
-do i=2,7
-    write(*,*) 'Timer #', i, ': ', t(i)
-enddo
     
 end subroutine sn_1d
 
@@ -176,7 +175,7 @@ subroutine power_iteration(mesh,quad,bc,xs,keig)
     real(kind=8)                                :: ktol = 1.e-6
     
     integer                                     :: groups, NFM
-    integer                                     :: i, j, g, gg    
+    integer                                     :: i, g   
     
     ! - - - - - - - - - - - - - - - - - - - - - - - - - - -  - - - - - -
     
@@ -205,7 +204,7 @@ subroutine power_iteration(mesh,quad,bc,xs,keig)
     
     ! begin power iteration loop
     kiter_loop: do kiter=1,kiter_max
-        write(*,*) 'Power iteration ', kiter
+        write(*,*) 'Power iteration ', kiter, ': ', read_timer(1)
     
         ! store old flux, keig
         phi_old = phi
@@ -231,6 +230,8 @@ subroutine power_iteration(mesh,quad,bc,xs,keig)
         enddo
         phi = phi/fission_rate
         keig = keig*fission_rate
+        
+        write(*,*) '    keig = ', keig
         
         ! check for convergence
         if ( abs(keig-k_old) < ktol ) then
