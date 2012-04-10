@@ -3,13 +3,14 @@ use Quadrature
 use mesh_type
 use nuclear_data
 use stop_watch
+use state_module
 
 contains
 
 !=======================================================================
 ! SN_1D
 !=======================================================================
-subroutine sn_1d(mesh,quad,bc,xs,Q_iso,phi,Q_disc)
+subroutine sn_1d(mesh,quad,bc,xs,Q_iso,state,delta_flag,Q_disc)
     implicit none
 
     type(mesh_1d), intent(in)                           :: mesh
@@ -18,7 +19,8 @@ subroutine sn_1d(mesh,quad,bc,xs,Q_iso,phi,Q_disc)
     real(kind=8), dimension(2), intent(in)              :: bc
     real(kind=8), dimension(:,:,:), intent(in), optional:: Q_disc ! group, mesh, angle
     real(kind=8), dimension(:,:), intent(in)            :: Q_iso  ! group, mesh
-    real(kind=8), dimension(:,:), intent(inout)         :: phi
+    type(state_type), intent(inout)                     :: state
+    logical, intent(in)                                 :: delta_flag
        
         
     integer                             :: gsiter, siter
@@ -31,9 +33,10 @@ subroutine sn_1d(mesh,quad,bc,xs,Q_iso,phi,Q_disc)
     integer                             :: g, g_min, i, angle   
     integer                             :: groups, NFM, angles
     
-    real(kind=8), dimension(:,:,:), allocatable :: psi_edge, psi_mesh, psi_old_s
+    real(kind=8), dimension(:,:,:), allocatable :: psi_old_s
     real(kind=8), dimension(:,:), allocatable   :: phi_old
     real(kind=8), dimension(:), allocatable     :: Q_s, Q
+    real(kind=8)                                :: Q_d, del
     
     real(kind=8), dimension(10)                 :: t
     
@@ -43,13 +46,12 @@ subroutine sn_1d(mesh,quad,bc,xs,Q_iso,phi,Q_disc)
     NFM = mesh%NFM
     angles = quad%order
     
-    allocate(psi_edge(groups,NFM+1,angles), psi_mesh(groups,NFM,angles), &
-        & psi_old_s(groups,NFM+1,angles))
+    allocate(psi_old_s(groups,NFM+1,angles))
     allocate(phi_old(groups,NFM))
     allocate(Q(NFM),Q_s(NFM))
     
-    psi_edge = 0.0
-    psi_mesh = 0.0
+    state%psi_edge = 0.0
+    state%psi_mesh = 0.0
     phi_old = 0.0
     g_min = 1
 
@@ -67,57 +69,71 @@ subroutine sn_1d(mesh,quad,bc,xs,Q_iso,phi,Q_disc)
             endif
         endif
         
-        write(*,*) '    GS iter ', gsiter, maxval(abs(phi(g_min:groups,:)-phi_old(g_min:groups,:)))
-        phi_old = phi
+        if (gsiter==1) then
+            write(*,*) '    GS iter ', gsiter
+        else
+            write(*,*) '    GS iter ', gsiter,  &
+                & maxval(abs(state%phi(g_min:groups,:)-phi_old(g_min:groups,:)))
+        endif
+        
+        phi_old = state%phi
+        Q_d = 0.0
+        del = 0.0
         
         group_sweep: do g=g_min,groups
             ! build scattering source
             Q_s = 0.0
             do i=1,NFM
-                Q_s(i) = dot_product(xs(mesh%matl(i))%scat(g,:),phi(:,i)) - &
-                    & xs(mesh%matl(i))%scat(g,g)*phi(g,i)
+                Q_s(i) = dot_product(xs(mesh%matl(i))%scat(g,:),state%phi(:,i)) - &
+                    & xs(mesh%matl(i))%scat(g,g)*state%phi(g,i)
             enddo
                 
             source_iteration: do siter=1,siter_max
-                psi_old_s(g,:,:) = psi_edge(g,:,:)
+                psi_old_s(g,:,:) = state%psi_edge(g,:,:)
                 
                 ! build total iso source
                 do i=1,NFM
-                    Q(i) = 0.5*(Q_s(i)+xs(mesh%matl(i))%scat(g,g)*phi(g,i) + Q_iso(g,i))
+                    Q(i) = 0.5*(Q_s(i)+xs(mesh%matl(i))%scat(g,g)*state%phi(g,i) + Q_iso(g,i))
                 enddo
                 
                 ! sweep over negative angles
                 do angle = 1,angles/2
-                    psi_edge(g,NFM+1,angle) = bc(2)*psi_edge(g,NFM+1,angles-angle+1)
+                    state%psi_edge(g,NFM+1,angle) = bc(2)*state%psi_edge(g,NFM+1,angles-angle+1)
                     do i=NFM,1,-1
-                        psi_edge(g,i,angle) = &
-                            & psi_edge(g,i+1,angle)*(quad%point(angle)/ & 
-                            & (quad%point(angle)-mesh%dx(i)*xs(mesh%matl(i))%tot(g))) + &
-                            & Q(i)*(-mesh%dx(i)/(quad%point(angle)-mesh%dx(i)*xs(mesh%matl(i))%tot(g)))
+                        if (present(Q_disc)) Q_d = Q_disc(g,i,angle)
+                        if (delta_flag) del = xs(mesh%matl(i))%delta(g,angle)
+                        state%psi_edge(g,i,angle) = &
+                            & state%psi_edge(g,i+1,angle)*(quad%point(angle)/ & 
+                            & (quad%point(angle)-mesh%dx(i)*(xs(mesh%matl(i))%tot(g)+del))) + &
+                            & (Q(i)+Q_d)*(-mesh%dx(i)/(quad%point(angle)- &
+                            & mesh%dx(i)*(xs(mesh%matl(i))%tot(g)+del)))
                     enddo
-                    psi_mesh(g,:,angle) = psi_edge(g,1:NFM,angle)
+                    state%psi_mesh(g,:,angle) = state%psi_edge(g,1:NFM,angle)
                 enddo
                 
                 ! sweep over positive angles
                 do angle = angles/2+1,angles
-                    psi_edge(g,1,angle) = bc(1)*psi_edge(g,1,angles-angle+1)
+                    state%psi_edge(g,1,angle) = bc(1)*state%psi_edge(g,1,angles-angle+1)
                     do i=2,NFM+1
-                        psi_edge(g,i,angle) = &
-                            & psi_edge(g,i-1,angle)*(quad%point(angle)/ &
-                            & (quad%point(angle)+mesh%dx(i-1)*xs(mesh%matl(i-1))%tot(g))) + &
-                            & Q(i-1)*(mesh%dx(i-1)/(quad%point(angle)+mesh%dx(i-1)*xs(mesh%matl(i-1))%tot(g)))
+                        if (present(Q_disc)) Q_d = Q_disc(g,i-1,angle)
+                        if (delta_flag) del = xs(mesh%matl(i-1))%delta(g,angle)
+                        state%psi_edge(g,i,angle) = &
+                            & state%psi_edge(g,i-1,angle)*(quad%point(angle)/ &
+                            & (quad%point(angle)+mesh%dx(i-1)*(xs(mesh%matl(i-1))%tot(g)+del))) + &
+                            & (Q(i-1)+Q_d)*(mesh%dx(i-1)/(quad%point(angle)+ &
+                            & mesh%dx(i-1)*(xs(mesh%matl(i-1))%tot(g)+del)))
                     enddo
-                    psi_mesh(g,:,angle) = psi_edge(g,2:NFM+1,angle)
+                    state%psi_mesh(g,:,angle) = state%psi_edge(g,2:NFM+1,angle)
                 enddo
                 
                 ! calculate scalar flux
-                phi(g,:) = 0.0
+                state%phi(g,:) = 0.0
                 do angle=1,angles
-                    phi(g,:) = phi(g,:)+quad%weight(angle)*psi_mesh(g,:,angle)
+                    state%phi(g,:) = state%phi(g,:)+quad%weight(angle)*state%psi_mesh(g,:,angle)
                 enddo
                 
                 ! check convergence 
-                if (maxval(abs(psi_old_s(g,:,:)-psi_edge(g,:,:))) < s_tol) then
+                if (maxval(abs(psi_old_s(g,:,:)-state%psi_edge(g,:,:))) < s_tol) then
                     ! write(*,*) '       Source converged at ', siter
                     exit source_iteration
                 elseif (siter == siter_max) then
@@ -132,7 +148,7 @@ subroutine sn_1d(mesh,quad,bc,xs,Q_iso,phi,Q_disc)
         ! check convergence
 !~         if (sum(abs(phi(g_min:groups,:)-phi_old(g_min:groups,:))) &
 !~             & /(groups-g_min+1+NFM) < gs_tol) then
-        if (sum(abs(phi-phi_old))/(groups+NFM) < gs_tol) then
+        if (sum(abs(state%phi-phi_old))/(groups+NFM) < gs_tol) then
             ! write(*,*) '       GS converged at ', gsiter
             exit gauss_seidel
         elseif (gsiter == gsiter_max) then
@@ -155,19 +171,20 @@ end subroutine sn_1d
 !=======================================================================
 ! POWER_ITERATION
 !=======================================================================
-subroutine power_iteration(mesh,quad,bc,xs,keig)
+subroutine power_iteration(mesh,quad,bc,xs,state,delta_flag)
     implicit none
     
     type(mesh_1d), intent(in)                   :: mesh
     type(xsdata), dimension(:), intent(in)      :: xs
     type(QuadGL), intent(in)                    :: quad
     real(kind=8), dimension(2), intent(in)      :: bc
-    real(kind=8), intent(out)                   :: keig
+    type(state_type), intent(inout)             :: state
+    logical, intent(in)                         :: delta_flag
     
     
     real(kind=8)                                :: k_old
     real(kind=8)                                :: fission_rate
-    real(kind=8), dimension(:,:), allocatable   :: phi, phi_old
+    real(kind=8), dimension(:,:), allocatable   :: phi_old
     real(kind=8), dimension(:,:), allocatable   :: Q_f
     
     integer                                     :: kiter
@@ -182,24 +199,33 @@ subroutine power_iteration(mesh,quad,bc,xs,keig)
     groups = xs(1)%groups
     NFM = mesh%NFM
     
-    allocate(phi(groups,NFM), phi_old(groups,NFM))
+    allocate(phi_old(groups,NFM))
     allocate(Q_f(groups,NFM))
-    
-    
     
     ! initialize scalar flux
     ! normalize to total fission rate
-    phi = 1.0
+    state%phi = 1.0
     fission_rate = 0
     do g=1,groups
         do i=1,NFM
-            fission_rate = fission_rate+phi(g,i)*xs(mesh%matl(i))%nufis(g)
+            fission_rate = fission_rate+state%phi(g,i)*xs(mesh%matl(i))%nufis(g)
         enddo
     enddo
-    phi = phi/fission_rate
+    
+!~     open(unit=41,file='nufis_check',action='write',status='replace')
+!~     write(41,*) 'matl phi nufis'
+!~     do g=1,groups
+!~         do i=1,NFM
+!~             write(41,*) mesh%matl(i), state%phi(g,i), xs(mesh%matl(i))%nufis(g)
+!~         enddo
+!~     enddo
+!~     write(41,*) fission_rate
+!~     close(unit=41)
+    
+    state%phi = state%phi/fission_rate
     
     ! initial guess for keig
-    keig = 1.0
+    state%keig = 1.0
     
     
     ! begin power iteration loop
@@ -207,34 +233,34 @@ subroutine power_iteration(mesh,quad,bc,xs,keig)
         write(*,*) 'Power iteration ', kiter, ': ', read_timer(1)
     
         ! store old flux, keig
-        phi_old = phi
-        k_old = keig
+        phi_old = state%phi
+        k_old = state%keig
         
         ! build fission source
         do g=1,groups
             do i=1,NFM
-                Q_f(g,i) = dot_product(xs(mesh%matl(i))%nufis,phi(:,i)) * &
-                    & xs(mesh%matl(i))%chi(g)/keig
+                Q_f(g,i) = dot_product(xs(mesh%matl(i))%nufis,state%phi(:,i)) * &
+                    & xs(mesh%matl(i))%chi(g)/state%keig
             enddo
         enddo
         
         ! CALL SN_1D TO GET NEW FLUX
-        call sn_1d(mesh,quad,bc,xs,Q_f,phi)
+        call sn_1d(mesh,quad,bc,xs,Q_f,state,delta_flag)
         
         ! update flux, keig
         fission_rate = 0
         do g=1,groups
             do i=1,NFM
-                fission_rate = fission_rate+phi(g,i)*xs(mesh%matl(i))%nufis(g)
+                fission_rate = fission_rate+state%phi(g,i)*xs(mesh%matl(i))%nufis(g)
             enddo
         enddo
-        phi = phi/fission_rate
-        keig = keig*fission_rate
+        state%phi = state%phi/fission_rate
+        state%keig = state%keig*fission_rate
         
-        write(*,*) '    keig = ', keig
+        write(*,*) '    keig = ', state%keig
         
         ! check for convergence
-        if ( abs(keig-k_old) < ktol ) then
+        if ( abs(state%keig-k_old) < ktol ) then
             write(*,*) 'Power iteration converged at ', kiter
             exit kiter_loop
         elseif (kiter == kiter_max) then
