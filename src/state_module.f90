@@ -2,7 +2,7 @@ module state_module
 
 type state_type
     real(kind=8), dimension(:,:), allocatable   :: phi
-    real(kind=8), dimension(:,:,:), allocatable :: psi_mesh, psi_edge
+    real(kind=8), dimension(:,:,:), allocatable :: psi_mesh, psi_edge ! group, mesh, angle
     real(kind=8)                                :: keig
 end type state_type
 

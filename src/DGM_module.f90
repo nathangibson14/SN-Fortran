@@ -17,11 +17,12 @@ type coarse_group
     integer                                     :: fine_groups
     integer                                     :: min_group
     real(kind=8), dimension(:,:,:), allocatable :: aflux        ! (x, angle, moment)
+    real(kind=8), dimension(:), allocatable     :: flux         ! (x)
     
     real(kind=8), dimension(:), allocatable     :: tot, nufis   ! (x)
     real(kind=8), dimension(:,:), allocatable   :: chi          ! (x, moment)
     real(kind=8), dimension(:,:,:), allocatable :: scat         ! (x, group, moment)
-    real(kind=8), dimension(:,:,:), allocatable :: delta      ! (x, angle, moment)  
+    real(kind=8), dimension(:,:,:), allocatable :: delta        ! (x, angle, moment)  
     
 end type coarse_group
 
@@ -107,7 +108,7 @@ subroutine flux_moments(psi,cg)
           do ai=1,angles
             do K=0,cg(g)%fine_groups-1
               do j=0,cg(g)%fine_groups-1
-                cg(g)%aflux(j,xi,ai) = cg(g)%aflux(j,xi,ai) + & 
+                cg(g)%aflux(xi,ai,j) = cg(g)%aflux(xi,ai,j) + & 
                   & DCT(cg(g)%fine_groups)%d(j,K)*psi(K+cg(g)%min_group,xi,ai)
               enddo
             enddo
@@ -141,7 +142,7 @@ subroutine build_fine_flux(psi,cg)
           do K=0,cg(g)%fine_groups-1
             do j=0,cg(g)%fine_groups-1
               psi(K+cg(g)%min_group,xi,ai)=psi(K+cg(g)%min_group,xi,ai) + &
-                & 2*DCT(cg(g)%fine_groups)%d(j,K)*cg(g)%aflux(j,xi,ai)/cg(g)%fine_groups
+                & 2*DCT(cg(g)%fine_groups)%d(j,K)*cg(g)%aflux(xi,ai,j)/cg(g)%fine_groups
               if (j==0) then
                 psi(K+cg(g)%min_group,xi,ai)=0.5_8*psi(K+cg(g)%min_group,xi,ai)
               endif
@@ -260,6 +261,7 @@ subroutine initialize_coarse_group(cg, fine_groups, min_group, &
     cg%fine_groups = fine_groups
     cg%min_group = min_group
     allocate(cg%aflux(NFM, angles, 0:fine_groups-1))
+    allocate(cg%flux(NFM))
     allocate(cg%tot(NFM), cg%nufis(NFM), cg%chi(NFM,0:fine_groups-1), &
         & cg%scat(NFM,coarse_groups,0:fine_groups-1), &
         & cg%delta(NFM, angles, 0:fine_groups-1))
@@ -335,7 +337,19 @@ subroutine dgm_sn(mesh,quad,bc,xs,state,structure)
     type(xsdata), dimension(:), allocatable         :: dgmxs
     type(mesh_1d)                                   :: dgmmesh    
     
-    integer                                     :: g, i, ai
+    integer                                     :: g, i, ai, gg, j
+    real(kind=8), dimension(:), allocatable     :: Q_iso
+    real(kind=8), dimension(:,:), allocatable   :: Q_disc
+    real(kind=8), dimension(:), allocatable     :: Q_f, tot
+    real(kind=8)                                :: Q_s, bc_err, fission_rate
+    real(kind=8), dimension(:,:), allocatable   :: psi_edge    
+    
+    integer                                     :: bciter, dgmiter, update
+    integer, parameter                          :: bciter_max = 100
+    integer, parameter                          :: dgmiter_max = 50
+    integer, parameter                          :: update_max = 1                
+    
+    
     
     allocate(cg(structure%coarse_groups))
     do g=1,structure%coarse_groups
@@ -361,45 +375,234 @@ subroutine dgm_sn(mesh,quad,bc,xs,state,structure)
         call compute_DCTs(structure%cg_map(g))
     enddo
     
+    allocate(Q_iso(mesh%NFM), Q_disc(mesh%NFM,quad%order), Q_f(mesh%NFM))
+    allocate(tot(mesh%NFM))
+    allocate(psi_edge(mesh%NFM+1,quad%order))
+    
     ! guess flux
     ! get exact solution to use
     call power_iteration(mesh,quad,bc,xs,exact,.false.)
+!~     state = exact
+    state%phi = 1.0_8
+    state%psi_mesh = 1.0_8
     
+    write(*,*) ''
+    write(*,*) ''
     write(*,*) 'STARTING DGM CALCULATION...',read_timer(1)    
-    
-    call data_moments(xs,mesh,exact%phi,exact%psi_mesh,cg)
-    do i=1,mesh%NFM
-        dgmxs(i)%groups = structure%coarse_groups
-        do g=1,structure%coarse_groups
-            dgmxs(i)%tot(g) = cg(g)%tot(i)
-            dgmxs(i)%nufis(g) = cg(g)%nufis(i)
-            dgmxs(i)%scat(g,:) = cg(g)%scat(i,:,0)
-            dgmxs(i)%chi(g) = cg(g)%chi(i,0)
-            dgmxs(i)%delta(g,:) = cg(g)%delta(i,:,0)
-        enddo
-    enddo
     
     dgmmesh = make_mesh_1d(mesh%x_edge,(/(1,i=1,mesh%NFM)/),(/(i,i=1,mesh%NFM)/))
     
-!~     open(unit=41,file='dgmxs',action='write',status='replace')
+    dgm_iteration: do dgmiter=1,dgmiter_max
+        write(*,*) 'DGM ITERATION ', dgmiter, ': ', read_timer(1)
+    
+        ! flux moments, data moments
+        call flux_moments(state%psi_mesh,cg)
+        call data_moments(xs,mesh,state%phi,state%psi_mesh,cg)
+                
+        ! 0th order solution
+        do i=1,mesh%NFM
+            dgmxs(i)%groups = structure%coarse_groups
+            do g=1,structure%coarse_groups
+                dgmxs(i)%tot(g) = cg(g)%tot(i)
+                dgmxs(i)%nufis(g) = cg(g)%nufis(i)
+                dgmxs(i)%scat(g,:) = cg(g)%scat(i,:,0)
+                dgmxs(i)%chi(g) = cg(g)%chi(i,0)
+                dgmxs(i)%delta(g,:) = cg(g)%delta(i,:,0)
+            enddo
+        enddo
+        call power_iteration(dgmmesh,quad,bc,dgmxs,dgmstate,.true.)
+        state%keig = dgmstate%keig
+        
+        write(*,*) ' DGM KEIG: ', state%keig
+        write(*,*) ' FG KEIG:  ', exact%keig
+        
+        
+        
+        do g=1,structure%coarse_groups
+            do i=1,mesh%NFM
+                cg(g)%aflux(i,:,0) = dgmstate%psi_mesh(g,i,:)
+                cg(g)%flux(i) = dgmstate%phi(g,i)
+            enddo
+        enddo
+        
+        ! higher order moments
+        
+        ! calculate fission source
+        Q_f = 0.0
+        do g=1,structure%coarse_groups
+            do i=1,mesh%NFM
+                Q_f(i) = Q_f(i) + cg(g)%nufis(i)*cg(g)%flux(i)/dgmstate%keig
+            enddo
+        enddo
+        
+        psi_edge = 1.0_8
+        
+        do g=1,structure%coarse_groups
+        
+            ! build tot
+            do i=1,mesh%NFM
+                tot(i) = cg(g)%tot(i)
+            enddo
+        
+            do j=1,cg(g)%fine_groups-1
+                
+                ! build RHS
+                do i=1,mesh%NFM
+                    Q_s = 0.0
+                    do gg=1,structure%coarse_groups
+                        Q_s = Q_s + cg(g)%scat(i,gg,j)*cg(gg)%flux(i)
+                    enddo
+                
+                    Q_iso(i) = 0.5_8*(Q_f(i)*cg(g)%chi(i,j)+Q_s)
+                    do ai=1,quad%order
+                        Q_disc(i,ai) = -cg(g)%delta(i,ai,j)*cg(g)%aflux(i,ai,0)
+                    enddo
+                enddo
+                
+                
+                
+                ! BC iterations
+                bc_iteration: do bciter=1,bciter_max
+                
+                    call sweep_sd(psi_edge,cg(g)%aflux(:,:,j),bc,mesh, &
+                        & tot,quad,Q_iso,Q_disc=Q_disc)
+                    
+                    ! check convergence
+                    bc_err = 0
+                    do ai=1,quad%order/2
+                        bc_err = bc_err + abs(psi_edge(mesh%NFM+1,ai) - &
+                            & bc(2)*psi_edge(mesh%NFM+1,quad%order-ai+1))
+                    enddo
+                    do ai=quad%order/2+1,quad%order
+                        bc_err = bc_err + abs(psi_edge(1,ai) - &
+                            & bc(1)*psi_edge(1,quad%order-ai+1))
+                    enddo
+                    
+                    
+                    if (bc_err < 1e-10) then
+                        exit bc_iteration
+                    elseif (bciter == bciter_max) then
+                        write(*,*) 'BC iteration not converged!', bc_err, g,j
+                        stop
+                    endif
+                
+                enddo bc_iteration
+              
+        
+            enddo
+        enddo
+        
+        call build_fine_flux(state%psi_mesh, cg)    
+        
+        ! calculate scalar flux
+        state%phi(g,:) = 0.0
+        do ai=1,quad%order
+            state%phi(g,:) = state%phi(g,:)+quad%weight(ai)*state%psi_mesh(g,:,ai)
+        enddo
+
+        fission_rate = 0
+        do g=1,structure%fine_groups
+            do i=1,mesh%NFM
+                fission_rate = fission_rate+state%phi(g,i)*xs(mesh%matl(i))%nufis(g)
+            enddo
+        enddo        
+        state%phi=state%phi/fission_rate
+
+        
+        ! flux updates go here
+        flux_updates: do update=1,update_max
+            
+            Q_f = 0.0
+            do g=1,structure%fine_groups
+                do i=1,mesh%NFM
+                    Q_f(i) = Q_f(i) + xs(mesh%matl(i))%nufis(g)*state%phi(g,i)/state%keig
+                enddo
+            enddo
+            
+            
+            do g=1,structure%fine_groups
+                
+                ! build tot
+                do i=1,mesh%NFM
+                    tot(i) = xs(mesh%matl(i))%tot(g)
+                enddo
+                
+                ! build RHS
+                do i=1,mesh%NFM
+                    Q_s = dot_product(xs(mesh%matl(i))%scat(g,:),state%phi(:,i))
+                
+                    Q_iso(i) = 0.5_8*(Q_f(i)*xs(mesh%matl(i))%chi(g)+Q_s)
+                enddo
+                
+                ! BC iterations
+                bc_iteration2: do bciter=1,bciter_max
+                
+                    call sweep_sd(psi_edge,state%psi_mesh(g,:,:),bc,mesh, &
+                        & tot,quad,Q_iso)
+                    
+                    ! check convergence
+                    bc_err = 0
+                    do ai=1,quad%order/2
+                        bc_err = bc_err + abs(psi_edge(mesh%NFM+1,ai) - &
+                            & bc(2)*psi_edge(mesh%NFM+1,quad%order-ai+1))
+                    enddo
+                    do ai=quad%order/2+1,quad%order
+                        bc_err = bc_err + abs(psi_edge(1,ai) - &
+                            & bc(1)*psi_edge(1,quad%order-ai+1))
+                    enddo
+                    
+                    
+                    if (bc_err < 1e-10) then
+                        exit bc_iteration2
+                    elseif (bciter == bciter_max) then
+                        write(*,*) 'BC iteration in update not converged!', bc_err
+                        stop
+                    endif
+                
+                enddo bc_iteration2
+            
+                ! calculate scalar flux
+                state%phi(g,:) = 0.0
+                do ai=1,quad%order
+                    state%phi(g,:) = state%phi(g,:)+quad%weight(ai)*state%psi_mesh(g,:,ai)
+                enddo
+            
+            enddo
+        
+            
+            
+!~             fission_rate = 0
+!~             do g=1,structure%fine_groups
+!~                 do i=1,mesh%NFM
+!~                     fission_rate = fission_rate+state%phi(g,i)*xs(mesh%matl(i))%nufis(g)
+!~                 enddo
+!~             enddo
+            
+!~             state%phi = state%phi/fission_rate
+!~             state%keig = state%keig*fission_rate
+!~             write(*,*) state%keig
+        
+        
+        enddo flux_updates
+        
+        write(*,*) 'Infinity norm of psi_mesh error: ', maxval(abs(state%psi_mesh-exact%psi_mesh))
+        write(*,*) 'Minimum psi_mesh: ', minval(state%psi_mesh)
+        write(*,*) ''
+        write(*,*) ''
+    
+    enddo dgm_iteration
+    
+    
+    
+!~     open(unit=41,file='dgm_aflux',action='write',status='replace')
+!~     open(unit=42,file='exact_aflux',action='write',status='replace')
 !~     do i=1,mesh%NFM
-!~     write(41,*) 'tot nufis chi delta1 delta2 delta3 delta4 delta5 delta6'
-!~     do g=1,structure%coarse_groups
-!~         write(41,101) dgmxs(i)%tot(g), dgmxs(i)%nufis(g), dgmxs(i)%chi(g), dgmxs(i)%delta(g,1), & 
-!~             & dgmxs(i)%delta(g,2), dgmxs(i)%delta(g,3), dgmxs(i)%delta(g,4) , dgmxs(i)%delta(g,5), &
-!~             & dgmxs(i)%delta(g,6), dgmxs(i)%delta(g,7), dgmxs(i)%delta(g,8)
-!~         write(41,101) dgmxs(2)%scat(g,:)
+!~         write(41,102) state%psi_mesh(50,i,:)
+!~         write(42,102) exact%psi_mesh(50,i,:)
 !~     enddo
-!~     enddo
-!~     101 format (1X, 12E12.4)
+!~     102 format (8E12.4)
 !~     close(unit=41)
     
-    
-    call power_iteration(dgmmesh,quad,bc,dgmxs,dgmstate,.true.)
-    write(*,*) ' DGM KEIG: ', dgmstate%keig
-    
-    
-    state = exact
 
 end subroutine dgm_sn
 

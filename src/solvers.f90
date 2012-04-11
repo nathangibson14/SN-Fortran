@@ -36,12 +36,11 @@ subroutine sn_1d(mesh,quad,bc,xs,Q_iso,state,delta_flag,Q_disc)
     real(kind=8), dimension(:,:,:), allocatable :: psi_old_s
     real(kind=8), dimension(:,:), allocatable   :: phi_old
     real(kind=8), dimension(:), allocatable     :: Q_s, Q
-    real(kind=8)                                :: Q_d, del
+    real(kind=8)                                :: Q_d
     
-    real(kind=8), dimension(10)                 :: t
-    
-    t = 0.0
-    
+    real(kind=8), dimension(:), allocatable     :: tot    
+    real(kind=8), dimension(:,:), allocatable   :: delta
+   
     groups = xs(1)%groups
     NFM = mesh%NFM
     angles = quad%order
@@ -49,6 +48,10 @@ subroutine sn_1d(mesh,quad,bc,xs,Q_iso,state,delta_flag,Q_disc)
     allocate(psi_old_s(groups,NFM+1,angles))
     allocate(phi_old(groups,NFM))
     allocate(Q(NFM),Q_s(NFM))
+
+    allocate(tot(NFM))
+    allocate(delta(NFM,angles))
+    delta = 0.0
     
     state%psi_edge = 0.0
     state%psi_mesh = 0.0
@@ -69,16 +72,14 @@ subroutine sn_1d(mesh,quad,bc,xs,Q_iso,state,delta_flag,Q_disc)
             endif
         endif
         
-        if (gsiter==1) then
-            write(*,*) '    GS iter ', gsiter
-        else
-            write(*,*) '    GS iter ', gsiter,  &
-                & maxval(abs(state%phi(g_min:groups,:)-phi_old(g_min:groups,:)))
-        endif
+!~         if (gsiter==1) then
+!~             write(*,*) '    GS iter ', gsiter
+!~         else
+!~             write(*,*) '    GS iter ', gsiter,  &
+!~                 & maxval(abs(state%phi(g_min:groups,:)-phi_old(g_min:groups,:)))
+!~         endif
         
         phi_old = state%phi
-        Q_d = 0.0
-        del = 0.0
         
         group_sweep: do g=g_min,groups
             ! build scattering source
@@ -88,6 +89,11 @@ subroutine sn_1d(mesh,quad,bc,xs,Q_iso,state,delta_flag,Q_disc)
                     & xs(mesh%matl(i))%scat(g,g)*state%phi(g,i)
             enddo
                 
+            do i=1,NFM
+                tot(i)=xs(mesh%matl(i))%tot(g)
+                if (delta_flag) delta(i,:) = xs(mesh%matl(i))%delta(g,:)
+            enddo    
+                
             source_iteration: do siter=1,siter_max
                 psi_old_s(g,:,:) = state%psi_edge(g,:,:)
                 
@@ -96,35 +102,9 @@ subroutine sn_1d(mesh,quad,bc,xs,Q_iso,state,delta_flag,Q_disc)
                     Q(i) = 0.5*(Q_s(i)+xs(mesh%matl(i))%scat(g,g)*state%phi(g,i) + Q_iso(g,i))
                 enddo
                 
-                ! sweep over negative angles
-                do angle = 1,angles/2
-                    state%psi_edge(g,NFM+1,angle) = bc(2)*state%psi_edge(g,NFM+1,angles-angle+1)
-                    do i=NFM,1,-1
-                        if (present(Q_disc)) Q_d = Q_disc(g,i,angle)
-                        if (delta_flag) del = xs(mesh%matl(i))%delta(g,angle)
-                        state%psi_edge(g,i,angle) = &
-                            & state%psi_edge(g,i+1,angle)*(quad%point(angle)/ & 
-                            & (quad%point(angle)-mesh%dx(i)*(xs(mesh%matl(i))%tot(g)+del))) + &
-                            & (Q(i)+Q_d)*(-mesh%dx(i)/(quad%point(angle)- &
-                            & mesh%dx(i)*(xs(mesh%matl(i))%tot(g)+del)))
-                    enddo
-                    state%psi_mesh(g,:,angle) = state%psi_edge(g,1:NFM,angle)
-                enddo
-                
-                ! sweep over positive angles
-                do angle = angles/2+1,angles
-                    state%psi_edge(g,1,angle) = bc(1)*state%psi_edge(g,1,angles-angle+1)
-                    do i=2,NFM+1
-                        if (present(Q_disc)) Q_d = Q_disc(g,i-1,angle)
-                        if (delta_flag) del = xs(mesh%matl(i-1))%delta(g,angle)
-                        state%psi_edge(g,i,angle) = &
-                            & state%psi_edge(g,i-1,angle)*(quad%point(angle)/ &
-                            & (quad%point(angle)+mesh%dx(i-1)*(xs(mesh%matl(i-1))%tot(g)+del))) + &
-                            & (Q(i-1)+Q_d)*(mesh%dx(i-1)/(quad%point(angle)+ &
-                            & mesh%dx(i-1)*(xs(mesh%matl(i-1))%tot(g)+del)))
-                    enddo
-                    state%psi_mesh(g,:,angle) = state%psi_edge(g,2:NFM+1,angle)
-                enddo
+                ! SWEEP                
+                call sweep_sd(state%psi_edge(g,:,:), state%psi_mesh(g,:,:), bc, &
+                    & mesh, tot, quad, Q, delta=delta)
                 
                 ! calculate scalar flux
                 state%phi(g,:) = 0.0
@@ -272,6 +252,63 @@ subroutine power_iteration(mesh,quad,bc,xs,state,delta_flag)
     
 
 end subroutine power_iteration
+
+!=======================================================================
+! SWEEP_SD
+!=======================================================================
+subroutine sweep_sd(psi_edge,psi_mesh,bc,mesh,tot,quad,Q_iso,Q_disc,delta)
+    implicit none
+    
+    real(kind=8), dimension(:,:), intent(inout)         :: psi_edge,psi_mesh
+    real(kind=8), dimension(2), intent(in)              :: bc
+    type(mesh_1d), intent(in)                           :: mesh
+    real(kind=8), dimension(:), intent(in)              :: tot
+    real(kind=8), dimension(:,:), intent(in), optional  :: delta
+    type(QuadGL), intent(in)                            :: quad
+    real(kind=8), dimension(:), intent(in)              :: Q_iso
+    real(kind=8), dimension(:,:), intent(in), optional  :: Q_disc
+    
+    integer         :: angles, NFM
+    integer         :: angle, i
+    real(kind=8)    :: Q_d, del    
+    
+    angles = quad%order
+    NFM = mesh%NFM        
+
+    Q_d = 0
+    del = 0
+    
+    ! sweep over negative angles
+    do angle = 1,angles/2
+        psi_edge(NFM+1,angle) = bc(2)*psi_edge(NFM+1,angles-angle+1)
+        do i=NFM,1,-1
+            if (present(Q_disc)) Q_d = Q_disc(i,angle)
+            if (present(delta)) del = delta(i,angle)
+            psi_edge(i,angle) = &
+                & psi_edge(i+1,angle)*(quad%point(angle)/ & 
+                & (quad%point(angle)-mesh%dx(i)*(tot(i)+del))) + &
+                & (Q_iso(i)+Q_d)*(-mesh%dx(i)/(quad%point(angle)- &
+                & mesh%dx(i)*(tot(i)+del)))
+        enddo
+        psi_mesh(:,angle) = psi_edge(1:NFM,angle)
+    enddo
+    
+    ! sweep over positive angles
+    do angle = angles/2+1,angles
+        psi_edge(1,angle) = bc(1)*psi_edge(1,angles-angle+1)
+        do i=2,NFM+1
+            if (present(Q_disc)) Q_d = Q_disc(i-1,angle)
+            if (present(delta)) del = delta(i-1,angle)
+            psi_edge(i,angle) = &
+                & psi_edge(i-1,angle)*(quad%point(angle)/ &
+                & (quad%point(angle)+mesh%dx(i-1)*(tot(i-1)+del))) + &
+                & (Q_iso(i-1)+Q_d)*(mesh%dx(i-1)/(quad%point(angle)+ &
+                & mesh%dx(i-1)*(tot(i-1)+del)))
+        enddo
+        psi_mesh(:,angle) = psi_edge(2:NFM+1,angle)
+    enddo
+    
+end subroutine sweep_sd
 
 
 end module solvers
