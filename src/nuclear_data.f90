@@ -75,16 +75,16 @@ subroutine test_pin_cell(sigma, groups, folder)
     real(kind=8), dimension(:,:), pointer       :: temp_scat
     integer                                     :: i
     
-    write(*,*) 'h-h2o...'    
+    write(*,*) folder//'/h-h2o...'    
     xs(1) = get_nuclear_data(groups, folder//'/h-h2o')
 
-    write(*,*) 'o16...'
+    write(*,*) folder//'/o16...'
     xs(2) = get_nuclear_data(groups, folder//'/o16')
     
-    write(*,*) 'u235...'
+    write(*,*) folder//'/u235...'
     xs(3) = get_nuclear_data(groups, folder//'/u235')
     
-    write(*,*) 'u238...'
+    write(*,*) folder//'/u238...'
     xs(4) = get_nuclear_data(groups, folder//'/u238')
     
     allocate(sigma(1)%tot(groups),sigma(1)%chi(groups),sigma(1)%nufis(groups), &
