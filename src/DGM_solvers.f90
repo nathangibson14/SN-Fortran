@@ -38,8 +38,8 @@ subroutine dgm_sn(mesh,quad,bc,xs,state,structure)
     
     integer                                     :: bciter, dgmiter, update
     integer, parameter                          :: bciter_max = 100
-    integer, parameter                          :: dgmiter_max = 30
-    integer, parameter                          :: update_max = 1                
+    integer, parameter                          :: dgmiter_max = 15
+    integer, parameter                          :: update_max = 4               
     real(kind=8), parameter                     :: dgm_tol = 1e-5
     real(kind=8), parameter                     :: bc_tol = 1e-9
     
@@ -75,8 +75,10 @@ subroutine dgm_sn(mesh,quad,bc,xs,state,structure)
     
     ! guess flux
     ! get exact solution to use
-    call power_iteration(mesh,quad,bc,xs,exact,.false.)
+!~     call power_iteration(mesh,quad,bc,xs,exact,.false.)
 !~     state = exact
+    exact%keig = 0.0
+    exact%psi_mesh = 0.0
 
     state%psi_mesh = 1.0_8
     state%phi = 1.0_8
@@ -123,6 +125,8 @@ subroutine dgm_sn(mesh,quad,bc,xs,state,structure)
                 cg(g)%flux(i) = dgmstate%phi(g,i)
             enddo
         enddo
+        
+        write(*,*) 'Starting higher order moments:', read_timer(1)
         
         ! higher order moments
         
@@ -190,19 +194,22 @@ subroutine dgm_sn(mesh,quad,bc,xs,state,structure)
         call build_fine_flux(state%psi_mesh, cg)    
         
         ! calculate scalar flux
-        state%phi(g,:) = 0.0
-        do ai=1,quad%order
-            state%phi(g,:) = state%phi(g,:)+quad%weight(ai)*state%psi_mesh(g,:,ai)
-        enddo
-
-        fission_rate = 0
         do g=1,structure%fine_groups
-            do i=1,mesh%NFM
-                fission_rate = fission_rate+state%phi(g,i)*xs(mesh%matl(i))%nufis(g)
+            state%phi(g,:) = 0.0
+            do ai=1,quad%order
+                state%phi(g,:) = state%phi(g,:)+quad%weight(ai)*state%psi_mesh(g,:,ai)
             enddo
-        enddo        
-        state%phi=state%phi/fission_rate
+        enddo
+!~ 
+!~         fission_rate = 0
+!~         do g=1,structure%fine_groups
+!~             do i=1,mesh%NFM
+!~                 fission_rate = fission_rate+state%phi(g,i)*xs(mesh%matl(i))%nufis(g)
+!~             enddo
+!~         enddo        
+!~         state%phi=state%phi/fission_rate
 
+        write(*,*) 'Starting flux updates:', read_timer(1)
         
         ! flux updates go here
         flux_updates: do update=1,update_max
@@ -361,8 +368,8 @@ subroutine no_high_order(mesh,quad,bc,xs,state,structure)
         ! flux updates go here
         flux_updates: do update=1,update_max
             
-            call Lei_update(state, mesh, xs, quad, structure, bc)
-!~             call Rahnema_update(state, mesh, xs, quad, structure, bc, phi_old, cg)
+!~             call Lei_update(state, mesh, xs, quad, structure, bc)
+            call Rahnema_update(state, mesh, xs, quad, structure, bc, phi_old, cg)
 !~             call kill_negative_fluxes(state, mesh, xs, quad, structure, bc)
         
         enddo flux_updates
@@ -541,21 +548,21 @@ subroutine Rahnema_update(state, mesh, xs, quad, structure, bc, phi_old, cg)
     real(kind=8), dimension(:,:,:), allocatable   :: scat_rec
     
     ! scat_rec
-!~     allocate(scat_rec(structure%fine_groups, structure%coarse_groups, mesh%NFM))
-    allocate(scat_rec(1, structure%coarse_groups, 1))
-!~     do i=1,mesh%NFM
-!~         do g=1,structure%fine_groups
-!~             do gg=1,structure%coarse_groups
-!~                 temp = 0
-!~                 do L=0,cg(gg)%fine_groups-1
-!~                     temp = temp+phi_old(cg(gg)%min_group+L,i)* &
-!~                         & xs(mesh%matl(i))%scat(g,cg(gg)%min_group+L)
-!~                 enddo
-!~                 scat_rec(g,gg,i) = temp / sum(phi_old(cg(gg)%min_group: &
-!~                     cg(gg)%min_group+cg(gg)%fine_groups-1,i))
-!~             enddo
-!~         enddo
-!~     enddo
+    allocate(scat_rec(structure%fine_groups, structure%coarse_groups, mesh%NFM))
+!~     allocate(scat_rec(1, structure%coarse_groups, 1))
+    do i=1,mesh%NFM
+        do g=1,structure%fine_groups
+            do gg=1,structure%coarse_groups
+                temp = 0
+                do L=0,cg(gg)%fine_groups-1
+                    temp = temp+phi_old(cg(gg)%min_group+L,i)* &
+                        & xs(mesh%matl(i))%scat(g,cg(gg)%min_group+L)
+                enddo
+                scat_rec(g,gg,i) = temp / sum(phi_old(cg(gg)%min_group: &
+                    cg(gg)%min_group+cg(gg)%fine_groups-1,i))
+            enddo
+        enddo
+    enddo
     
     
     
@@ -579,17 +586,17 @@ subroutine Rahnema_update(state, mesh, xs, quad, structure, bc, phi_old, cg)
         do i=1,mesh%NFM
             Q_s = 0
             do gg=1,structure%coarse_groups
-                do ggg=1,structure%coarse_groups
-                    temp = 0
-                    do L=0,cg(gg)%fine_groups-1
-                        temp = temp+phi_old(cg(gg)%min_group+L,i)* &
-                            & xs(mesh%matl(i))%scat(g,cg(gg)%min_group+L)
-                    enddo
-                    scat_rec(1,gg,1) = temp / sum(phi_old(cg(gg)%min_group: &
-                        cg(gg)%min_group+cg(gg)%fine_groups-1,i))
-                enddo
-!~                 Q_s = Q_s +scat_rec(g,gg,i)*cg(gg)%flux(i)
-                Q_s = Q_s +scat_rec(1,gg,1)*cg(gg)%flux(i)
+!~                 do ggg=1,structure%coarse_groups
+!~                     temp = 0
+!~                     do L=0,cg(gg)%fine_groups-1
+!~                         temp = temp+phi_old(cg(gg)%min_group+L,i)* &
+!~                             & xs(mesh%matl(i))%scat(g,cg(gg)%min_group+L)
+!~                     enddo
+!~                     scat_rec(1,gg,1) = temp / sum(phi_old(cg(gg)%min_group: &
+!~                         cg(gg)%min_group+cg(gg)%fine_groups-1,i))
+!~                 enddo
+                Q_s = Q_s +scat_rec(g,gg,i)*cg(gg)%flux(i)
+!~                 Q_s = Q_s +scat_rec(1,gg,1)*cg(gg)%flux(i)
             enddo
         
             Q_iso(i) = 0.5_8*(Q_f(i)*xs(mesh%matl(i))%chi(g)+Q_s)
